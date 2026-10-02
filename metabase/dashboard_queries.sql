@@ -1,0 +1,2 @@
+-- Dashboard queries for Metabase go here.
+-- Add them once the warehouse tables (db/init/05_warehouse.sql) are defined.
