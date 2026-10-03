@@ -15,7 +15,12 @@ Requires Docker Desktop.
    ```bash
    docker compose logs postgres
    ```
-4. Open Metabase at http://localhost:3000. On the first visit it asks you to create an admin account
+4. Load the warehouse (ETL). Add `--test` to load the demo scenario data first:
+   ```bash
+   ./etl/run_etl.sh --test
+   ```
+   All 8 QA checklist items at the end should say PASS. Details: [etl/README.md](etl/README.md).
+5. Open Metabase at http://localhost:3000. On the first visit it asks you to create an admin account
    (any name, email and password; it is stored only in your local `metabase_db`, not online).
    Then add the warehouse: PostgreSQL, host `postgres`, port `5432`, database `warehouse_db`, and the
    user and password from `.env`.
