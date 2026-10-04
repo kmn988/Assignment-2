@@ -3,7 +3,7 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS inventory;
 
 CREATE TABLE inventory.product (
-    product_id INTEGER PRIMARY KEY,
+    product_id VARCHAR(20) PRIMARY KEY,
     sku VARCHAR(50) NOT NULL UNIQUE,
     product_name VARCHAR(150) NOT NULL,
     category VARCHAR(50) NOT NULL,
@@ -12,29 +12,29 @@ CREATE TABLE inventory.product (
 );
 
 CREATE TABLE inventory.store (
-    store_id INTEGER PRIMARY KEY,
+    store_id VARCHAR(20) PRIMARY KEY,
     store_name VARCHAR(100) NOT NULL,
     location VARCHAR(150) NOT NULL,
     active_flag BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE inventory.inventory (
-    inventory_id INTEGER PRIMARY KEY,
-    product_id INTEGER NOT NULL REFERENCES inventory.product(product_id),
-    store_id INTEGER NOT NULL REFERENCES inventory.store(store_id),
+    inventory_id VARCHAR(20) PRIMARY KEY,
+    product_id VARCHAR(20) NOT NULL REFERENCES inventory.product(product_id),
+    store_id VARCHAR(20) NOT NULL REFERENCES inventory.store(store_id),
     on_hand_quantity INTEGER NOT NULL DEFAULT 0 CHECK (on_hand_quantity >= 0),
     reserved_quantity INTEGER NOT NULL DEFAULT 0 CHECK (reserved_quantity >= 0),
-    available_to_sell INTEGER GENERATED ALWAYS AS
-        (on_hand_quantity - reserved_quantity) STORED,
+    available_to_sell INTEGER NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (product_id, store_id),
-    CHECK (reserved_quantity <= on_hand_quantity)
+    CHECK (reserved_quantity <= on_hand_quantity),
+    CHECK (available_to_sell = on_hand_quantity - reserved_quantity)
 );
 
 CREATE TABLE inventory.inventory_movement (
-    movement_id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    product_id INTEGER NOT NULL,
-    store_id INTEGER NOT NULL,
+    movement_id VARCHAR(50) PRIMARY KEY,
+    product_id VARCHAR(20) NOT NULL,
+    store_id VARCHAR(20) NOT NULL,
     movement_type VARCHAR(30) NOT NULL,
     quantity_change INTEGER NOT NULL,
     source_system VARCHAR(30) NOT NULL,
@@ -44,51 +44,25 @@ CREATE TABLE inventory.inventory_movement (
         REFERENCES inventory.inventory(product_id, store_id)
 );
 
-INSERT INTO inventory.product
-    (product_id, sku, product_name, category, unit_price, active_flag)
-VALUES
-    (101, 'GAME-A', 'Game A', 'Video Games', 59.99, TRUE),
-    (102, 'GAME-B', 'Game B', 'Video Games', 79.99, TRUE),
-    (103, 'CTRL-01', 'Wireless Controller', 'Accessories', 89.99, TRUE),
-    (104, 'HEAD-01', 'Gaming Headset', 'Accessories', 69.99, TRUE);
+CREATE OR REPLACE FUNCTION inventory.calculate_available_to_sell()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    NEW.available_to_sell :=
+        NEW.on_hand_quantity - NEW.reserved_quantity;
+    RETURN NEW;
+END;
+$$;
 
-INSERT INTO inventory.store
-    (store_id, store_name, location, active_flag)
-VALUES
-    (201, 'Broadway', 'Sydney', TRUE),
-    (202, 'Parramatta', 'Sydney', TRUE);
-
-INSERT INTO inventory.inventory
-    (inventory_id, product_id, store_id, on_hand_quantity, reserved_quantity)
-VALUES
-    (1, 101, 201, 5, 0),
-    (2, 102, 201, 1, 0),
-    (3, 103, 201, 8, 0),
-    (4, 104, 201, 4, 0),
-    (5, 101, 202, 3, 0),
-    (6, 102, 202, 2, 0),
-    (7, 103, 202, 6, 0),
-    (8, 104, 202, 3, 0);
-
-CREATE OR REPLACE VIEW inventory.inventory_availability AS
-SELECT
-    i.inventory_id,
-    p.product_id,
-    p.sku,
-    p.product_name,
-    s.store_id,
-    s.store_name,
-    i.on_hand_quantity,
-    i.reserved_quantity,
-    i.available_to_sell,
-    i.updated_at
-FROM inventory.inventory AS i
-JOIN inventory.product AS p ON i.product_id = p.product_id
-JOIN inventory.store AS s ON i.store_id = s.store_id;
+CREATE TRIGGER calculate_available_to_sell
+BEFORE INSERT OR UPDATE ON inventory.inventory
+FOR EACH ROW
+EXECUTE FUNCTION inventory.calculate_available_to_sell();
 
 CREATE OR REPLACE FUNCTION inventory.reserve_stock(
-    p_product_id INTEGER,
-    p_store_id INTEGER,
+    p_product_id VARCHAR,
+    p_store_id VARCHAR,
     p_quantity INTEGER,
     p_reservation_reference VARCHAR
 )
@@ -119,12 +93,12 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    SELECT quantity_change
+    SELECT -quantity_change
     INTO v_previous_quantity
     FROM inventory.inventory_movement
     WHERE product_id = p_product_id
       AND store_id = p_store_id
-      AND movement_type = 'RESERVE'
+      AND movement_type = 'ONLINE_RESERVATION'
       AND source_system = 'ECOMMERCE'
       AND source_reference_id = p_reservation_reference;
 
@@ -133,6 +107,21 @@ BEGIN
             RAISE EXCEPTION
                 'This reservation reference was already used with a different quantity';
         END IF;
+
+        IF EXISTS (
+            SELECT 1
+            FROM inventory.inventory_movement
+            WHERE product_id = p_product_id
+              AND store_id = p_store_id
+              AND source_system = 'ECOMMERCE'
+              AND source_reference_id = p_reservation_reference
+              AND movement_type IN (
+                  'RESERVATION_RELEASE', 'RESERVATION_COLLECTION'
+              )
+        ) THEN
+            RETURN FALSE;
+        END IF;
+
         RETURN TRUE;
     END IF;
 
@@ -147,12 +136,12 @@ BEGIN
       AND store_id = p_store_id;
 
     INSERT INTO inventory.inventory_movement (
-        product_id, store_id, movement_type,
-        quantity_change, source_system, source_reference_id
+        movement_id, product_id, store_id, movement_type,
+        quantity_change, source_system, source_reference_id, movement_timestamp
     )
     VALUES (
-        p_product_id, p_store_id, 'RESERVE',
-        p_quantity, 'ECOMMERCE', p_reservation_reference
+        'M-' || gen_random_uuid()::TEXT, p_product_id, p_store_id, 'ONLINE_RESERVATION',
+        -p_quantity, 'ECOMMERCE', p_reservation_reference, CURRENT_TIMESTAMP
     );
 
     RETURN TRUE;
@@ -160,8 +149,8 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION inventory.sell_stock(
-    p_product_id INTEGER,
-    p_store_id INTEGER,
+    p_product_id VARCHAR,
+    p_store_id VARCHAR,
     p_quantity INTEGER,
     p_transaction_reference VARCHAR
 )
@@ -192,7 +181,7 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    SELECT quantity_change
+    SELECT -quantity_change
     INTO v_previous_quantity
     FROM inventory.inventory_movement
     WHERE product_id = p_product_id
@@ -202,7 +191,7 @@ BEGIN
       AND source_reference_id = p_transaction_reference;
 
     IF FOUND THEN
-        IF v_previous_quantity <> -p_quantity THEN
+        IF v_previous_quantity <> p_quantity THEN
             RAISE EXCEPTION
                 'This transaction reference was already used with a different quantity';
         END IF;
@@ -220,12 +209,12 @@ BEGIN
       AND store_id = p_store_id;
 
     INSERT INTO inventory.inventory_movement (
-        product_id, store_id, movement_type,
-        quantity_change, source_system, source_reference_id
+        movement_id, product_id, store_id, movement_type,
+        quantity_change, source_system, source_reference_id, movement_timestamp
     )
     VALUES (
-        p_product_id, p_store_id, 'POS_SALE',
-        -p_quantity, 'POS', p_transaction_reference
+        'M-' || gen_random_uuid()::TEXT, p_product_id, p_store_id, 'POS_SALE',
+        -p_quantity, 'POS', p_transaction_reference, CURRENT_TIMESTAMP
     );
 
     RETURN TRUE;
@@ -233,8 +222,8 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION inventory.release_stock(
-    p_product_id INTEGER,
-    p_store_id INTEGER,
+    p_product_id VARCHAR,
+    p_store_id VARCHAR,
     p_quantity INTEGER,
     p_reservation_reference VARCHAR
 )
@@ -265,14 +254,22 @@ BEGIN
         RETURN FALSE;
     END IF;
 
-    SELECT COALESCE(SUM(quantity_change), 0)
+    SELECT COALESCE(SUM(
+        CASE
+            WHEN movement_type = 'ONLINE_RESERVATION' THEN -quantity_change
+            WHEN movement_type = 'RESERVATION_RELEASE' THEN -quantity_change
+            WHEN movement_type = 'RESERVATION_COLLECTION' THEN quantity_change
+        END
+    ), 0)
     INTO v_reference_balance
     FROM inventory.inventory_movement
     WHERE product_id = p_product_id
       AND store_id = p_store_id
       AND source_system = 'ECOMMERCE'
       AND source_reference_id = p_reservation_reference
-      AND movement_type IN ('RESERVE', 'RELEASE');
+      AND movement_type IN (
+          'ONLINE_RESERVATION', 'RESERVATION_RELEASE', 'RESERVATION_COLLECTION'
+      );
 
     IF v_reference_balance < p_quantity
        OR v_reserved_quantity < p_quantity THEN
@@ -286,12 +283,12 @@ BEGIN
       AND store_id = p_store_id;
 
     INSERT INTO inventory.inventory_movement (
-        product_id, store_id, movement_type,
-        quantity_change, source_system, source_reference_id
+        movement_id, product_id, store_id, movement_type,
+        quantity_change, source_system, source_reference_id, movement_timestamp
     )
     VALUES (
-        p_product_id, p_store_id, 'RELEASE',
-        -p_quantity, 'ECOMMERCE', p_reservation_reference
+        'M-' || gen_random_uuid()::TEXT, p_product_id, p_store_id, 'RESERVATION_RELEASE',
+        p_quantity, 'ECOMMERCE', p_reservation_reference, CURRENT_TIMESTAMP
     );
 
     RETURN TRUE;
