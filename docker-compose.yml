@@ -14,7 +14,7 @@ services:
       # Scripts here run once, on the first start with an empty volume
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -36,18 +36,20 @@ services:
       MB_DB_PASS: ${POSTGRES_PASSWORD}
       MB_DB_HOST: postgres
 
-  # ETL owner: when etl/ has a Dockerfile and code, add a service like this:
-  # etl:
-  #   build: ./etl
-  #   profiles: ["tools"]
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   environment:
-  #     DB_HOST: postgres
-  #     DB_PORT: 5432
-  #     POSTGRES_USER: ${POSTGRES_USER}
-  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  seed:
+    image: postgres:16
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: postgres
+    volumes:
+      - ./db/seed:/seed:ro
+    entrypoint: ["sh", "-c", "for f in /seed/*.sql; do echo \"== $$f\"; psql -v ON_ERROR_STOP=1 -f \"$$f\" || exit 1; done; echo seed finished"]
 
 volumes:
   pgdata:
