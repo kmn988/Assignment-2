@@ -148,17 +148,20 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS sell_stock(VARCHAR, VARCHAR, INTEGER, VARCHAR);
+
 CREATE OR REPLACE FUNCTION sell_stock(
     p_product_id VARCHAR,
     p_store_id VARCHAR,
     p_quantity INTEGER,
     p_transaction_reference VARCHAR
 )
-RETURNS BOOLEAN
+RETURNS TABLE (success BOOLEAN, reason VARCHAR)
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_available INTEGER;
+    v_on_hand INTEGER;
     v_previous_quantity INTEGER;
 BEGIN
     IF p_quantity IS NULL OR p_quantity <= 0 THEN
@@ -170,17 +173,20 @@ BEGIN
         RAISE EXCEPTION 'Transaction reference is required';
     END IF;
 
-    SELECT available_to_sell
-    INTO v_available
+    SELECT available_to_sell, on_hand_quantity
+    INTO v_available, v_on_hand
     FROM inventory
     WHERE product_id = p_product_id
       AND store_id = p_store_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
-        RETURN FALSE;
+        RETURN QUERY SELECT FALSE, 'OUT_OF_STOCK'::VARCHAR;
+        RETURN;
     END IF;
 
+    -- Idempotency: a retry with the same POS transaction reference is already
+    -- considered successful and must not reduce stock a second time.
     SELECT -quantity_change
     INTO v_previous_quantity
     FROM inventory_movement
@@ -195,11 +201,18 @@ BEGIN
             RAISE EXCEPTION
                 'This transaction reference was already used with a different quantity';
         END IF;
-        RETURN TRUE;
+
+        RETURN QUERY SELECT TRUE, 'NONE'::VARCHAR;
+        RETURN;
     END IF;
 
     IF v_available < p_quantity THEN
-        RETURN FALSE;
+        IF v_on_hand > 0 THEN
+            RETURN QUERY SELECT FALSE, 'RESERVED_STOCK'::VARCHAR;
+        ELSE
+            RETURN QUERY SELECT FALSE, 'OUT_OF_STOCK'::VARCHAR;
+        END IF;
+        RETURN;
     END IF;
 
     UPDATE inventory
@@ -217,7 +230,7 @@ BEGIN
         -p_quantity, 'POS', p_transaction_reference, CURRENT_TIMESTAMP
     );
 
-    RETURN TRUE;
+    RETURN QUERY SELECT TRUE, 'NONE'::VARCHAR;
 END;
 $$;
 
@@ -294,5 +307,26 @@ BEGIN
     RETURN TRUE;
 END;
 $$;
+
+-- ================================================================
+-- LIVE DEMO SUPPORT: availability check
+-- Read-only. POS calls it after sell_stock refuses a sale, to tell
+-- RESERVED_STOCK (units on hand but reserved) from OUT_OF_STOCK.
+-- ================================================================
+-- BEGIN live-demo functions
+CREATE OR REPLACE FUNCTION check_availability(
+    p_product_id VARCHAR,
+    p_store_id VARCHAR
+)
+RETURNS TABLE (out_on_hand INTEGER, out_reserved INTEGER, out_available INTEGER)
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT i.on_hand_quantity, i.reserved_quantity, i.available_to_sell
+    FROM inventory i
+    WHERE i.product_id = p_product_id
+      AND i.store_id = p_store_id;
+$$;
+-- END live-demo functions
 
 COMMIT;
