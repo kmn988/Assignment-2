@@ -7,8 +7,9 @@
 -- 22 in total). An item PASSES only if ALL its tests pass; if one fails,
 -- the "failed_tests" column names it.
 --
--- Item 6 and 7 use the Miro demo scenario (Game B @ Broadway, Customer A,
--- Game C, Game A); they pass only if the source data contains that story.
+-- Items 6 and 7 look for the Miro scenario in whatever data is loaded:
+-- a fully-reserved last unit, its active reservation and a blocked POS
+-- attempt; and cancelled reservations releasing their stock.
 -- Run after 04_etl_load.sql and screenshot the result for evidence.
 -- =====================================================================
 
@@ -17,7 +18,12 @@ WITH snap AS (
   FROM dw.fact_inventory_snapshot f
   JOIN dw.dim_product p USING (product_key)
   JOIN dw.dim_store   s USING (store_key)
-  WHERE f.date_key = TO_CHAR(CURRENT_DATE, 'YYYYMMDD')::INT
+  WHERE f.date_key = (SELECT max(date_key) FROM dw.fact_inventory_snapshot)   -- the latest snapshot
+),
+-- product/store pairs where the last physical stock is fully held for online customers
+fully_reserved AS (
+  SELECT product_key, store_key FROM snap
+  WHERE on_hand_quantity > 0 AND reserved_quantity > 0 AND available_to_sell = 0
 ),
 checks AS (
 
@@ -59,7 +65,7 @@ checks AS (
          NOT EXISTS (SELECT 1 FROM dw.fact_inventory_snapshot f
                      JOIN dw.dim_product p USING (product_key) JOIN dw.dim_store s USING (store_key)
                      JOIN inventory.inventory i ON i.product_id = p.product_id AND i.store_id = s.store_id
-                     WHERE f.date_key = TO_CHAR(CURRENT_DATE,'YYYYMMDD')::INT
+                     WHERE f.date_key = (SELECT max(date_key) FROM dw.fact_inventory_snapshot)
                        AND f.available_to_sell <> i.available_to_sell)
   UNION ALL SELECT 13, 'No negative ATS (no oversell)',
          NOT EXISTS (SELECT 1 FROM snap WHERE available_to_sell < 0)
@@ -71,37 +77,35 @@ checks AS (
                       GROUP BY product_key, store_key) r USING (product_key, store_key)
            WHERE sn.reserved_quantity <> COALESCE(r.q, 0))
 
-  -- ---------- 5. End-to-end scenario: last-unit conflict ----------
-  UNION ALL SELECT 15, 'Scenario: Game B @ Broadway On Hand=1 Reserved=1 ATS=0',
-         EXISTS (SELECT 1 FROM snap WHERE product_name = 'Game B' AND store_name = 'Broadway'
-                 AND on_hand_quantity = 1 AND reserved_quantity = 1 AND available_to_sell = 0)
-  UNION ALL SELECT 16, 'Scenario: FACT_RESERVATION records Customer A ACTIVE reservation',
-         EXISTS (SELECT 1 FROM dw.fact_reservation f
-                 JOIN dw.dim_customer c USING (customer_key) JOIN dw.dim_product p USING (product_key)
-                 WHERE c.customer_name = 'Customer A' AND p.product_name = 'Game B'
-                   AND f.reservation_status = 'ACTIVE')
-  UNION ALL SELECT 17, 'Scenario: FACT_POS_ACTIVITY records BLOCKED / RESERVED_STOCK attempt',
-         EXISTS (SELECT 1 FROM dw.fact_pos_activity f
-                 JOIN dw.dim_product p USING (product_key) JOIN dw.dim_store s USING (store_key)
-                 WHERE p.product_name = 'Game B' AND s.store_name = 'Broadway'
-                   AND f.transaction_status = 'BLOCKED' AND f.rejection_reason = 'RESERVED_STOCK')
-  UNION ALL SELECT 18, 'Scenario: blocked attempt adds no revenue',
-         (SELECT COALESCE(sum(line_amount),0) FROM dw.fact_pos_activity f
-          JOIN dw.dim_product p USING (product_key) JOIN dw.dim_store s USING (store_key)
-          WHERE p.product_name = 'Game B' AND s.store_name = 'Broadway'
-            AND f.transaction_status = 'COMPLETED') = 0
+  -- ---------- 5. End-to-end scenario: last-unit conflict (Miro frame 09) ----------
+  -- Data-driven: works on any dataset that contains the scenario.
+  UNION ALL SELECT 15, 'Scenario: some product/store has On Hand > 0, Reserved > 0, ATS = 0',
+         EXISTS (SELECT 1 FROM fully_reserved)
+  UNION ALL SELECT 16, 'Scenario: FACT_RESERVATION holds an ACTIVE reservation on that stock',
+         EXISTS (SELECT 1 FROM dw.fact_reservation f JOIN fully_reserved USING (product_key, store_key)
+                 WHERE f.reservation_status = 'ACTIVE')
+  UNION ALL SELECT 17, 'Scenario: FACT_POS_ACTIVITY records a BLOCKED / RESERVED_STOCK attempt on that stock',
+         EXISTS (SELECT 1 FROM dw.fact_pos_activity f JOIN fully_reserved USING (product_key, store_key)
+                 WHERE f.transaction_status = 'BLOCKED' AND f.rejection_reason = 'RESERVED_STOCK')
+  UNION ALL SELECT 18, 'Every BLOCKED attempt has a reason, and every OUT_OF_STOCK one is on stock with On Hand = 0',
+         NOT EXISTS (SELECT 1 FROM dw.fact_pos_activity
+                     WHERE transaction_status = 'BLOCKED' AND rejection_reason IS NULL)
+     AND NOT EXISTS (SELECT 1 FROM dw.fact_pos_activity f JOIN snap USING (product_key, store_key)
+                     WHERE f.rejection_reason = 'OUT_OF_STOCK' AND snap.on_hand_quantity > 0)
 
   -- ---------- 6. Additional scenarios ----------
-  UNION ALL SELECT 19, 'Reservation cancellation works: Game C reservation CANCELLED, ATS back to 1',
-         EXISTS (SELECT 1 FROM dw.fact_reservation f JOIN dw.dim_product p USING (product_key)
-                 WHERE p.product_name = 'Game C' AND f.reservation_status = 'CANCELLED')
-     AND EXISTS (SELECT 1 FROM snap WHERE product_name = 'Game C' AND store_name = 'Broadway'
-                 AND reserved_quantity = 0 AND available_to_sell = 1)
-  UNION ALL SELECT 20, 'Normal POS sale: Game A @ Broadway COMPLETED, ATS = 4',
-         EXISTS (SELECT 1 FROM dw.fact_pos_activity f JOIN dw.dim_product p USING (product_key)
-                 JOIN dw.dim_store s USING (store_key)
-                 WHERE p.product_name = 'Game A' AND s.store_name = 'Broadway' AND f.transaction_status = 'COMPLETED')
-     AND EXISTS (SELECT 1 FROM snap WHERE product_name = 'Game A' AND store_name = 'Broadway' AND available_to_sell = 4)
+  UNION ALL SELECT 19, 'Reservation cancellation works: cancelled reservations no longer hold stock',
+         EXISTS (SELECT 1 FROM dw.fact_reservation WHERE reservation_status = 'CANCELLED')
+     AND NOT EXISTS (
+           SELECT 1 FROM snap sn
+           JOIN (SELECT DISTINCT product_key, store_key FROM dw.fact_reservation
+                 WHERE reservation_status = 'CANCELLED') c USING (product_key, store_key)
+           LEFT JOIN (SELECT product_key, store_key, sum(quantity) q FROM dw.fact_reservation
+                      WHERE reservation_status = 'ACTIVE' GROUP BY 1, 2) a USING (product_key, store_key)
+           WHERE sn.reserved_quantity <> COALESCE(a.q, 0))
+  UNION ALL SELECT 20, 'Normal POS sale: COMPLETED sales are recorded with revenue',
+         EXISTS (SELECT 1 FROM dw.fact_pos_activity
+                 WHERE transaction_status = 'COMPLETED' AND line_amount > 0)
 
   -- ---------- 7. Cleaning worked ----------
   UNION ALL SELECT 21, 'Cleaning: no duplicate natural keys in any dimension',
@@ -125,28 +129,43 @@ items(item, qa_item, tests) AS (VALUES
 )
 SELECT i.item,
        i.qa_item                                              AS qa_checklist_item,
-       CASE WHEN bool_and(c.ok) THEN 'PASS' ELSE 'FAIL' END   AS result,
-       count(*) FILTER (WHERE c.ok) || ' of ' || count(*)     AS tests_passed,
-       COALESCE(string_agg(c.check_name, '; ') FILTER (WHERE NOT c.ok), '') AS failed_tests
+       CASE WHEN bool_and(COALESCE(c.ok, false)) THEN 'PASS' ELSE 'FAIL' END AS result,
+       count(*) FILTER (WHERE c.ok IS TRUE) || ' of ' || count(*) AS tests_passed,
+       COALESCE(string_agg(c.check_name, '; ') FILTER (WHERE c.ok IS NOT TRUE), '') AS failed_tests
 FROM items i
 JOIN checks c ON c.n = ANY (i.tests)
 GROUP BY i.item, i.qa_item
 ORDER BY i.item;
 
 -- Detail: every small test (only needed if an item above FAILS)
--- SELECT n, check_name, CASE WHEN ok THEN 'PASS' ELSE 'FAIL' END FROM checks ORDER BY n;
+-- (to see each small test, replace the final SELECT with: SELECT n, check_name, ok FROM checks ORDER BY n;)
 
--- Expected dashboard figures for the last-unit scenario (Miro step 10):
--- Active Reservations = 1 · Available Units = 0 · Blocked POS Conflicts = 1
-SELECT
-  (SELECT count(*) FROM dw.fact_reservation f JOIN dw.dim_product p USING (product_key)
-     JOIN dw.dim_store s USING (store_key)
-   WHERE p.product_name = 'Game B' AND s.store_name = 'Broadway' AND f.reservation_status = 'ACTIVE') AS active_reservations,
-  (SELECT available_to_sell FROM dw.fact_inventory_snapshot f JOIN dw.dim_product p USING (product_key)
-     JOIN dw.dim_store s USING (store_key)
-   WHERE p.product_name = 'Game B' AND s.store_name = 'Broadway'
-     AND f.date_key = TO_CHAR(CURRENT_DATE,'YYYYMMDD')::INT) AS available_units,
-  (SELECT count(DISTINCT transaction_id) FROM dw.fact_pos_activity f JOIN dw.dim_product p USING (product_key)
-     JOIN dw.dim_store s USING (store_key)
-   WHERE p.product_name = 'Game B' AND s.store_name = 'Broadway'
-     AND f.transaction_status = 'BLOCKED' AND f.rejection_reason = 'RESERVED_STOCK') AS blocked_pos_conflicts;
+-- Last-unit conflict figures (Miro frame 09, step 10), one row per product/store
+-- where the last physical stock is fully reserved:
+--   active_reservations · available_units (ATS) · blocked_pos_conflicts (RESERVED_STOCK)
+SELECT s.store_name, p.product_name,
+       sn.on_hand_quantity, sn.reserved_quantity,
+       (SELECT count(*) FROM dw.fact_reservation r
+         WHERE r.product_key = sn.product_key AND r.store_key = sn.store_key
+           AND r.reservation_status = 'ACTIVE')                          AS active_reservations,
+       sn.available_to_sell                                              AS available_units,
+       (SELECT count(DISTINCT transaction_id) FROM dw.fact_pos_activity f
+         WHERE f.product_key = sn.product_key AND f.store_key = sn.store_key
+           AND f.transaction_status = 'BLOCKED' AND f.rejection_reason = 'RESERVED_STOCK') AS blocked_pos_conflicts
+FROM dw.fact_inventory_snapshot sn
+JOIN dw.dim_product p USING (product_key)
+JOIN dw.dim_store   s USING (store_key)
+WHERE sn.date_key = (SELECT max(date_key) FROM dw.fact_inventory_snapshot)
+  AND sn.on_hand_quantity > 0 AND sn.reserved_quantity > 0 AND sn.available_to_sell = 0
+ORDER BY s.store_name, p.product_name;
+
+-- Data-consistency warning: OUT_OF_STOCK attempts on stock that has units on hand
+SELECT f.transaction_id, s.store_name, p.product_name, sn.on_hand_quantity, sn.available_to_sell,
+       f.rejection_reason
+FROM dw.fact_pos_activity f
+JOIN dw.dim_product p USING (product_key)
+JOIN dw.dim_store   s USING (store_key)
+JOIN dw.fact_inventory_snapshot sn
+  ON sn.product_key = f.product_key AND sn.store_key = f.store_key AND sn.date_key = (SELECT max(date_key) FROM dw.fact_inventory_snapshot)
+WHERE f.rejection_reason = 'OUT_OF_STOCK' AND sn.on_hand_quantity > 0
+ORDER BY f.transaction_id;
