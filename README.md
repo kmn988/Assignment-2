@@ -15,9 +15,9 @@ Requires Docker Desktop.
    ```bash
    docker compose logs postgres
    ```
-4. Load the warehouse (ETL). Add `--test` to load the demo scenario data first:
+4. Load the warehouse (ETL). On a fresh database add `--seed` to load the team data (db/seed) first:
    ```bash
-   ./etl/run_etl.sh --test
+   ./etl/run_etl.sh --seed
    ```
    All 8 QA checklist items at the end should say PASS. Details: [etl/README.md](etl/README.md).
 5. Open Metabase at http://localhost:3000. On the first visit it asks you to create an admin account

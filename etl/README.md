@@ -17,15 +17,16 @@ From the repo root, with the stack up (`docker compose up -d postgres metabase`)
 
 ```bash
 ./etl/run_etl.sh          # real data
-./etl/run_etl.sh --test   # demo: loads test data into the 3 source DBs first
+./etl/run_etl.sh --seed   # fresh database: load the team data (db/seed) first
 ```
 
 On Windows without bash, run the same files in DBeaver against `warehouse_db`, in order: 01 → 02 → 03 → 04 → 05.
-Test data: run `test_data/seed_inventory.sql` in `inventory_db`, `seed_ecommerce.sql` in `ecommerce_db`,
-`seed_pos.sql` in `pos_db` first, and `test_data/add_dirty_rows.sql` between 03 and 04.
+Team data: run the files in `db/seed/` first (each one switches to its own database).
+`--seed` only works on a fresh database (`docker compose down -v`), because the seed rows can be loaded once.
 
-Success = all **8 QA checklist items** in step 05 say **PASS**, and the last line shows `1 | 0 | 1`
-(Game B: 1 active reservation, 0 available, 1 blocked POS attempt). Items 6–7 test the Miro
+Success = all **8 QA checklist items** in step 05 say **PASS**. Below them, one row per fully-reserved
+last unit (for example Astro Bot @ Broadway: 1 active reservation, 0 available, 1 blocked POS attempt),
+and a consistency warning list that should be empty. Items 6–7 test the Miro
 demo scenario and pass only if the data contains it.
 
 ## Files
@@ -36,9 +37,7 @@ demo scenario and pass only if the data contains it.
 | `02_check_sources.sql` | warehouse_db | Lists any table, column or status that doesn't match the Miro design, plus row counts |
 | `03_staging.sql` | warehouse_db | Copies source rows into `staging.stg_*` (9 tables) |
 | `04_etl_load.sql` | warehouse_db | Clean (rejects logged in `dw.etl_reject_log`) → transform → load 4 dims, then 4 facts |
-| `05_validation.sql` | warehouse_db | PASS/FAIL for the 8 ETL items on the QA checklist (22 small tests underneath) + the scenario figures |
-| `test_data/seed_*.sql` | each source DB | Test rows with the Miro scenario (only until real data arrives) |
-| `test_data/add_dirty_rows.sql` | warehouse_db | Fake bad rows to show the cleaning rules working (test only) |
+| `05_validation.sql` | warehouse_db | PASS/FAIL for the 8 ETL items on the QA checklist (22 small tests underneath), the last-unit conflict figures, and OUT_OF_STOCK consistency warnings |
 
 ## What the ETL needs from each source owner
 

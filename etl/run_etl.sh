@@ -3,9 +3,10 @@
 # run_etl.sh — run the Warehouse/ETL pipeline (owner: Aravind)
 #
 # From the repo root, with the stack running (docker compose up -d postgres metabase):
-#   ./etl/run_etl.sh          # real data: link sources, check, stage, load, validate
-#   ./etl/run_etl.sh --test   # first load the TEST data into the 3 source DBs
-#                             # and add fake dirty rows to prove the cleaning step
+#   ./etl/run_etl.sh          # link sources, check, stage, load, validate
+#   ./etl/run_etl.sh --seed   # FIRST load the team's shared data (db/seed/*.sql)
+#                             # into the 3 source DBs — only on a fresh database
+#                             # (after docker compose down -v), or rows clash
 #
 # It runs psql inside the "ebg_postgres" container from docker-compose.yml,
 # using POSTGRES_USER from .env. The warehouse tables themselves are created
@@ -24,8 +25,8 @@ if [[ -f "$REPO_DIR/.env" ]]; then
   DB_USER="${DB_USER:-postgres}"
 fi
 
-TEST=false
-[[ "${1:-}" == "--test" ]] && TEST=true
+SEED=false
+[[ "${1:-}" == "--seed" ]] && SEED=true
 
 run() {   # run <database> <file>
   echo ""
@@ -33,17 +34,18 @@ run() {   # run <database> <file>
   docker exec -i "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$1" < "$ETL_DIR/$2"
 }
 
-if $TEST; then
-  run inventory_db test_data/seed_inventory.sql
-  run ecommerce_db test_data/seed_ecommerce.sql
-  run pos_db       test_data/seed_pos.sql
+if $SEED; then   # each seed file switches to its own database with \connect
+  for f in "$REPO_DIR"/db/seed/*.sql; do
+    echo ""
+    echo "==================== seed: $(basename "$f") ===================="
+    docker exec -i "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$DB_USER" -d postgres < "$f"
+  done
 fi
 
 run warehouse_db 01_link_sources.sql
 run warehouse_db 02_check_sources.sql
 echo ">> Any MISSING TABLE / MISSING COLUMN / BAD STATUS rows above must be fixed first (see etl/README.md)."
 run warehouse_db 03_staging.sql
-$TEST && run warehouse_db test_data/add_dirty_rows.sql
 run warehouse_db 04_etl_load.sql
 run warehouse_db 05_validation.sql
 echo ""
