@@ -21,41 +21,36 @@ CREATE SCHEMA dw;
 -- ---------------------------------------------------------------------
 -- DIMENSIONS
 -- ---------------------------------------------------------------------
-CREATE TABLE dw.dim_date (
+CREATE TABLE IF NOT EXISTS dw.dim_date (
     date_key     INT PRIMARY KEY,          -- YYYYMMDD, e.g. 20260928
     full_date    DATE NOT NULL UNIQUE,
     day          INT NOT NULL,
-    month        INT NOT NULL,
-    month_name   VARCHAR(10) NOT NULL,
-    quarter      INT NOT NULL,
+    month        VARCHAR(10) NOT NULL,
+    quarter      VARCHAR(2) NOT NULL,      -- 'Q1'..'Q4' to match 'Q' || quarter
     year         INT NOT NULL,
-    day_of_week  VARCHAR(10) NOT NULL,
-    is_weekend   BOOLEAN NOT NULL
+    day_of_week  VARCHAR(10) NOT NULL
 );
 
-CREATE TABLE dw.dim_product (
+CREATE TABLE IF NOT EXISTS dw.dim_product (
     product_key   SERIAL PRIMARY KEY,
-    product_id    INT NOT NULL UNIQUE,     -- natural key from Inventory.PRODUCT
+    product_id    VARCHAR(20) NOT NULL UNIQUE,     -- natural key from Inventory.PRODUCT
     sku           VARCHAR(20) NOT NULL,
     product_name  VARCHAR(100) NOT NULL,
     category      VARCHAR(50),
-    unit_price    NUMERIC(10,2) NOT NULL,
-    active_flag   BOOLEAN NOT NULL
+    unit_price    NUMERIC(10,2) NOT NULL
 );
 
-CREATE TABLE dw.dim_store (
+CREATE TABLE IF NOT EXISTS dw.dim_store (
     store_key    SERIAL PRIMARY KEY,
-    store_id     INT NOT NULL UNIQUE,      -- natural key from Inventory.STORE
+    store_id     VARCHAR(20) NOT NULL UNIQUE,      -- natural key from Inventory.STORE
     store_name   VARCHAR(100) NOT NULL,
-    location     VARCHAR(100),
-    active_flag  BOOLEAN NOT NULL
+    location     VARCHAR(100)
 );
 
-CREATE TABLE dw.dim_customer (
+CREATE TABLE IF NOT EXISTS dw.dim_customer (
     customer_key   SERIAL PRIMARY KEY,
-    customer_id    INT NOT NULL UNIQUE,    -- natural key from E-Commerce.CUSTOMER
-    customer_name  VARCHAR(100) NOT NULL,
-    email          VARCHAR(150)
+    customer_id    VARCHAR(20) NOT NULL UNIQUE,    -- natural key from E-Commerce.CUSTOMER
+    customer_name  VARCHAR(100) NOT NULL
 );
 
 -- ---------------------------------------------------------------------
@@ -63,12 +58,11 @@ CREATE TABLE dw.dim_customer (
 -- ---------------------------------------------------------------------
 
 -- Grain: one product line per POS attempt (completed OR blocked)
-CREATE TABLE dw.fact_pos_activity (
+CREATE TABLE IF NOT EXISTS dw.fact_pos_activity (
     pos_fact_key         SERIAL PRIMARY KEY,
-    transaction_id       INT NOT NULL,
-    transaction_item_id  INT NOT NULL UNIQUE,
-    product_key          INT NOT NULL REFERENCES dw.dim_product(product_key),
-    store_key            INT NOT NULL REFERENCES dw.dim_store(store_key),
+    transaction_id       VARCHAR(20) NOT NULL,
+    product_key          SERIAL NOT NULL REFERENCES dw.dim_product(product_key),
+    store_key            SERIAL NOT NULL REFERENCES dw.dim_store(store_key),
     date_key             INT NOT NULL REFERENCES dw.dim_date(date_key),
     quantity             INT NOT NULL,
     unit_price           NUMERIC(10,2) NOT NULL,
@@ -78,13 +72,12 @@ CREATE TABLE dw.fact_pos_activity (
 );
 
 -- Grain: one product line per online order
-CREATE TABLE dw.fact_online_order (
+CREATE TABLE IF NOT EXISTS dw.fact_online_order (
     order_fact_key  SERIAL PRIMARY KEY,
-    order_id        INT NOT NULL,
-    order_item_id   INT NOT NULL UNIQUE,
-    product_key     INT NOT NULL REFERENCES dw.dim_product(product_key),
-    store_key       INT NOT NULL REFERENCES dw.dim_store(store_key),
-    customer_key    INT NOT NULL REFERENCES dw.dim_customer(customer_key),
+    order_id        VARCHAR(20) NOT NULL,
+    product_key     SERIAL NOT NULL REFERENCES dw.dim_product(product_key),
+    store_key       SERIAL NOT NULL REFERENCES dw.dim_store(store_key),
+    customer_key    SERIAL NOT NULL REFERENCES dw.dim_customer(customer_key),
     date_key        INT NOT NULL REFERENCES dw.dim_date(date_key),
     quantity        INT NOT NULL,
     unit_price      NUMERIC(10,2) NOT NULL,
@@ -93,23 +86,23 @@ CREATE TABLE dw.fact_online_order (
 );
 
 -- Grain: one reservation
-CREATE TABLE dw.fact_reservation (
+CREATE TABLE IF NOT EXISTS dw.fact_reservation (
     reservation_fact_key  SERIAL PRIMARY KEY,
-    reservation_id        INT NOT NULL UNIQUE,
-    order_id              INT NOT NULL,
-    product_key           INT NOT NULL REFERENCES dw.dim_product(product_key),
-    store_key             INT NOT NULL REFERENCES dw.dim_store(store_key),
-    customer_key          INT NOT NULL REFERENCES dw.dim_customer(customer_key),
+    reservation_id        VARCHAR(20) NOT NULL UNIQUE,
+    order_id              VARCHAR(20) NOT NULL,
+    product_key           SERIAL NOT NULL REFERENCES dw.dim_product(product_key),
+    store_key             SERIAL NOT NULL REFERENCES dw.dim_store(store_key),
+    customer_key          SERIAL NOT NULL REFERENCES dw.dim_customer(customer_key),
     date_key              INT NOT NULL REFERENCES dw.dim_date(date_key),
     quantity              INT NOT NULL,
     reservation_status    VARCHAR(20) NOT NULL
 );
 
 -- Grain: product · store · date (periodic snapshot, one row per ETL run date)
-CREATE TABLE dw.fact_inventory_snapshot (
+CREATE TABLE IF NOT EXISTS dw.fact_inventory_snapshot (
     inventory_fact_key  SERIAL PRIMARY KEY,
-    product_key         INT NOT NULL REFERENCES dw.dim_product(product_key),
-    store_key           INT NOT NULL REFERENCES dw.dim_store(store_key),
+    product_key         SERIAL NOT NULL REFERENCES dw.dim_product(product_key),
+    store_key           SERIAL NOT NULL REFERENCES dw.dim_store(store_key),
     date_key            INT NOT NULL REFERENCES dw.dim_date(date_key),
     on_hand_quantity    INT NOT NULL,
     reserved_quantity   INT NOT NULL,
@@ -130,7 +123,7 @@ CREATE INDEX ix_res_store    ON dw.fact_reservation (store_key);
 CREATE INDEX ix_snap_date    ON dw.fact_inventory_snapshot (date_key);
 
 -- ETL audit tables
-CREATE TABLE dw.etl_reject_log (
+CREATE TABLE IF NOT EXISTS dw.etl_reject_log (
     reject_id      SERIAL PRIMARY KEY,
     source_table   VARCHAR(50) NOT NULL,
     record_id      TEXT,
@@ -138,7 +131,7 @@ CREATE TABLE dw.etl_reject_log (
     rejected_at    TIMESTAMP NOT NULL DEFAULT now()
 );
 
-CREATE TABLE dw.etl_run_log (
+CREATE TABLE IF NOT EXISTS dw.etl_run_log (
     run_id        SERIAL PRIMARY KEY,
     step          VARCHAR(50) NOT NULL,
     rows_affected INT,

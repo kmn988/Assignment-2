@@ -80,15 +80,15 @@ UNION ALL SELECT 'pos.pos_transaction_item',     count(*) FROM pos.pos_transacti
 -- ---------------------------------------------------------------------
 SELECT 'BAD STATUS' AS problem, 'pos.transaction_status' AS field, transaction_status AS value, count(*)
 FROM pos.pos_transaction
-WHERE UPPER(TRIM(transaction_status)) NOT IN ('APPROVED','REJECTED','PENDING','COMPLETED','BLOCKED') GROUP BY 3
+WHERE UPPER(TRIM(transaction_status)) NOT IN ('COMPLETED','BLOCKED') GROUP BY 3
 UNION ALL
 SELECT 'BAD STATUS', 'pos.rejection_reason', rejection_reason, count(*)
 FROM pos.pos_transaction
-WHERE rejection_reason IS NOT NULL AND UPPER(TRIM(rejection_reason)) NOT IN ('RESERVED_STOCK','OUT_OF_STOCK') GROUP BY 3
+WHERE rejection_reason IS NOT NULL AND UPPER(TRIM(rejection_reason)) NOT IN ('RESERVED_STOCK','OUT_OF_STOCK','NONE') GROUP BY 3
 UNION ALL
 SELECT 'BAD STATUS', 'ecommerce.order_status', order_status, count(*)
 FROM ecommerce.online_order
-WHERE UPPER(TRIM(order_status)) NOT IN ('CONFIRMED','CANCELLED','COLLECTED') GROUP BY 3
+WHERE UPPER(TRIM(order_status)) NOT IN ('CONFIRMED','CANCELLED','COLLECTED','READY_FOR_COLLECTION') GROUP BY 3
 UNION ALL
 SELECT 'BAD STATUS', 'ecommerce.reservation_status', reservation_status, count(*)
 FROM ecommerce.reservation
