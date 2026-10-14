@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS pos_transaction (
     rejection_reason       VARCHAR(255)   NULL
         CHECK (rejection_reason IN ('RESERVED_STOCK','OUT_OF_STOCK','NONE')),
     total_amount           NUMERIC(10,2)  NOT NULL CHECK (total_amount >= 0),
+    -- a rejected attempt must say why
     CONSTRAINT ck_rejection_reason
         CHECK (transaction_status <> 'BLOCKED' OR rejection_reason IS NOT NULL)
 );
@@ -27,14 +28,35 @@ CREATE TABLE IF NOT EXISTS pos_transaction_item (
 );
 
 -- ---------------------------------------------------------------------------
--- POS sale check
--- Stock belongs to Inventory (inventory_db), so POS asks Inventory before
--- approving a sale. A failed sale is still recorded as BLOCKED so the attempt
--- is available to the warehouse and dashboard.
+-- POS sale attempt
+-- Stock belongs to Inventory (inventory_db), so POS asks Inventory before it
+-- records a sale. dblink runs one query in inventory_db:
+--   sell_stock(...)         checks Available-to-Sell (= on-hand - reserved) and, only if
+--                           enough is available, takes the stock in one atomic step
+--   check_availability(...) read-only; used to explain a refusal
+-- Result: COMPLETED/NONE, or BLOCKED with RESERVED_STOCK (units are on hand but
+-- reserved) or OUT_OF_STOCK. A blocked attempt is stored too (total 0.00, item kept),
+-- as in the seed data, so it feeds the warehouse.
+--
+-- pos_sale_form is an insert-only "form" so a Metabase Action (which can only run
+-- INSERT / UPDATE) can make a sale.
+-- Limit: sell_stock commits in inventory_db on its own, so the stock change is not
+-- rolled back if the insert below fails.
 -- ---------------------------------------------------------------------------
+-- BEGIN live-demo functions
 CREATE EXTENSION IF NOT EXISTS dblink;
 
+-- Older version (integer ids, employee / payment / receipt tables) no longer matches the tables above
 DROP FUNCTION IF EXISTS pos_attempt_sale(INT, INT, INT, INT, NUMERIC);
+
+-- Shared ID format: prefix + at least 3 digits (T051, TI051)
+CREATE OR REPLACE FUNCTION shared_id(p_prefix TEXT, p_number INTEGER)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT p_prefix || LPAD(p_number::TEXT, GREATEST(3, LENGTH(p_number::TEXT)), '0');
+$$;
 
 CREATE OR REPLACE FUNCTION pos_attempt_sale(
     p_store_id VARCHAR,
@@ -43,110 +65,93 @@ CREATE OR REPLACE FUNCTION pos_attempt_sale(
 )
 RETURNS TABLE (
     out_transaction_id VARCHAR,
-    out_status VARCHAR,
-    out_reason VARCHAR
+    out_transaction_status VARCHAR,
+    out_rejection_reason VARCHAR
 )
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_txn_id       VARCHAR(20);
-    v_item_id      VARCHAR(20);
-    v_unit_price   NUMERIC(10,2);
-    v_total        NUMERIC(10,2);
-    v_success      BOOLEAN;
-    v_reason       VARCHAR(30);
+    v_unit_price  NUMERIC(10,2);
+    v_line_amount NUMERIC(10,2);
+    v_txn_id      VARCHAR(20);
+    v_item_id     VARCHAR(20);
+    v_sold        BOOLEAN;
+    v_on_hand     INTEGER;
+    v_status      VARCHAR(20);
+    v_reason      VARCHAR(255);
+    v_total       NUMERIC(10,2);
 BEGIN
     IF p_quantity IS NULL OR p_quantity <= 0 THEN
-        RAISE EXCEPTION 'Sale quantity must be greater than zero';
+        RAISE EXCEPTION 'Quantity must be greater than zero';
     END IF;
 
-    -- Product master data and price belong to Inventory.
+    -- Product master data (and its price) belongs to inventory_db
     SELECT t.unit_price
     INTO v_unit_price
     FROM dblink(
         'dbname=inventory_db',
         format('SELECT unit_price FROM product WHERE product_id = %L', p_product_id)
-    ) AS t(unit_price NUMERIC(10,2));
+    ) AS t(unit_price NUMERIC);
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Unknown product %', p_product_id;
     END IF;
 
-    v_total := p_quantity * v_unit_price;
+    v_line_amount := p_quantity * v_unit_price;
 
-    -- Keep shared POS IDs simple and unique within this database.
-    PERFORM pg_advisory_xact_lock(hashtext('pos_demo_transaction_ids'));
+    -- Serialise ID generation so two attempts cannot receive the same ID
+    PERFORM pg_advisory_xact_lock(hashtext('pos_shared_ids'));
 
-    SELECT 'T' || LPAD(
-        (COALESCE(MAX(regexp_replace(transaction_id, '\D', '', 'g')::INTEGER), 0) + 1)::TEXT,
-        3,
-        '0'
-    )
-    INTO v_txn_id
-    FROM pos_transaction;
+    SELECT shared_id('T', COALESCE(MAX(regexp_replace(transaction_id, '\D', '', 'g')::INTEGER), 0) + 1)
+    INTO v_txn_id FROM pos_transaction;
 
-    SELECT 'TI' || LPAD(
-        (COALESCE(MAX(regexp_replace(transaction_item_id, '\D', '', 'g')::INTEGER), 0) + 1)::TEXT,
-        3,
-        '0'
-    )
-    INTO v_item_id
-    FROM pos_transaction_item;
+    SELECT shared_id('TI', COALESCE(MAX(regexp_replace(transaction_item_id, '\D', '', 'g')::INTEGER), 0) + 1)
+    INTO v_item_id FROM pos_transaction_item;
 
-    -- Ask Inventory first. sell_stock checks Available-to-Sell and updates
-    -- inventory atomically when the sale is allowed.
-    SELECT r.success, r.reason
-    INTO v_success, v_reason
+    -- Ask Inventory whether the sale is allowed (the transaction ID is the idempotency reference)
+    SELECT s.sold
+    INTO v_sold
     FROM dblink(
         'dbname=inventory_db',
-        format(
-            'SELECT success, reason FROM sell_stock(%L, %L, %s, %L)',
-            p_product_id, p_store_id, p_quantity, v_txn_id
-        )
-    ) AS r(success BOOLEAN, reason VARCHAR(30));
+        format('SELECT sell_stock(%L, %L, %s, %L)',
+               p_product_id, p_store_id, p_quantity, v_txn_id)
+    ) AS s(sold BOOLEAN);
+
+    IF v_sold IS TRUE THEN
+        v_status := 'COMPLETED';
+        v_reason := 'NONE';
+        v_total  := v_line_amount;
+    ELSE
+        -- Why was it refused? Enough units on hand but reserved, or not enough on hand?
+        SELECT a.on_hand
+        INTO v_on_hand
+        FROM dblink(
+            'dbname=inventory_db',
+            format('SELECT out_on_hand FROM check_availability(%L, %L)', p_product_id, p_store_id)
+        ) AS a(on_hand INTEGER);
+
+        v_status := 'BLOCKED';
+        v_reason := CASE WHEN COALESCE(v_on_hand, 0) >= p_quantity
+                         THEN 'RESERVED_STOCK'
+                         ELSE 'OUT_OF_STOCK' END;
+        v_total  := 0.00;
+    END IF;
 
     INSERT INTO pos_transaction (
-        transaction_id,
-        store_id,
-        transaction_timestamp,
-        transaction_status,
-        rejection_reason,
-        total_amount
+        transaction_id, store_id, transaction_status, rejection_reason, total_amount
     )
-    VALUES (
-        v_txn_id,
-        p_store_id,
-        CURRENT_TIMESTAMP,
-        CASE WHEN v_success THEN 'COMPLETED' ELSE 'BLOCKED' END,
-        CASE WHEN v_success THEN 'NONE' ELSE v_reason END,
-        CASE WHEN v_success THEN v_total ELSE 0.00 END
-    );
+    VALUES (v_txn_id, p_store_id, v_status, v_reason, v_total);
 
     INSERT INTO pos_transaction_item (
-        transaction_item_id,
-        transaction_id,
-        product_id,
-        quantity,
-        unit_price,
-        line_amount
+        transaction_item_id, transaction_id, product_id, quantity, unit_price, line_amount
     )
-    VALUES (
-        v_item_id,
-        v_txn_id,
-        p_product_id,
-        p_quantity,
-        v_unit_price,
-        v_total
-    );
+    VALUES (v_item_id, v_txn_id, p_product_id, p_quantity, v_unit_price, v_line_amount);
 
-    RETURN QUERY
-    SELECT v_txn_id,
-           CASE WHEN v_success THEN 'COMPLETED' ELSE 'BLOCKED' END::VARCHAR,
-           CASE WHEN v_success THEN 'NONE' ELSE v_reason END::VARCHAR;
+    RETURN QUERY SELECT v_txn_id::VARCHAR, v_status::VARCHAR, v_reason::VARCHAR;
 END;
 $$;
 
--- Insert-only form used by the Metabase "Make POS sale" action.
+-- Insert-only form used by the Metabase "Make POS sale" action
 CREATE OR REPLACE VIEW pos_sale_form AS
 SELECT NULL::VARCHAR(20) AS store_id,
        NULL::VARCHAR(20) AS product_id,
@@ -168,3 +173,4 @@ CREATE TRIGGER trg_pos_sale_form
 INSTEAD OF INSERT ON pos_sale_form
 FOR EACH ROW
 EXECUTE FUNCTION pos_sale_form_insert();
+-- END live-demo functions

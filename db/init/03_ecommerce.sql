@@ -50,12 +50,9 @@ CREATE TABLE customer (
 
 CREATE TABLE online_order (
     order_id                VARCHAR(20) PRIMARY KEY,
-
     customer_id             VARCHAR(20) NOT NULL
         REFERENCES customer(customer_id),
-
     fulfilment_store_id     VARCHAR(20) NOT NULL,
-
     order_status            VARCHAR(30) NOT NULL
         CHECK (
             order_status IN (
@@ -65,16 +62,12 @@ CREATE TABLE online_order (
                 'CANCELLED'
             )
         ),
-
     order_total             NUMERIC(10,2) NOT NULL
         CHECK (order_total >= 0),
-
     created_at              TIMESTAMP NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
-
     updated_at              TIMESTAMP NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
-
     CONSTRAINT ck_online_order_dates
         CHECK (updated_at >= created_at)
 );
@@ -89,21 +82,15 @@ CREATE TABLE online_order (
 
 CREATE TABLE order_item (
     order_item_id   VARCHAR(20) PRIMARY KEY,
-
     order_id        VARCHAR(20) NOT NULL
         REFERENCES online_order(order_id),
-
     product_id      VARCHAR(20) NOT NULL,
-
     quantity        INTEGER NOT NULL
         CHECK (quantity > 0),
-
     unit_price      NUMERIC(10,2) NOT NULL
         CHECK (unit_price >= 0),
-
     line_amount     NUMERIC(10,2) NOT NULL
         CHECK (line_amount >= 0),
-
     CONSTRAINT ck_order_item_line_amount
         CHECK (line_amount = quantity * unit_price)
 );
@@ -119,17 +106,12 @@ CREATE TABLE order_item (
 
 CREATE TABLE reservation (
     reservation_id      VARCHAR(20) PRIMARY KEY,
-
     order_id            VARCHAR(20) NOT NULL
         REFERENCES online_order(order_id),
-
     product_id          VARCHAR(20) NOT NULL,
-
     store_id            VARCHAR(20) NOT NULL,
-
     quantity            INTEGER NOT NULL
         CHECK (quantity > 0),
-
     reservation_status  VARCHAR(30) NOT NULL
         CHECK (
             reservation_status IN (
@@ -139,20 +121,15 @@ CREATE TABLE reservation (
                 'EXPIRED'
             )
         ),
-
     created_at          TIMESTAMP NOT NULL
         DEFAULT CURRENT_TIMESTAMP,
-
     expires_at          TIMESTAMP,
-
     released_at         TIMESTAMP,
-
     CONSTRAINT ck_reservation_expiry
         CHECK (
             expires_at IS NULL
             OR expires_at >= created_at
         ),
-
     CONSTRAINT ck_reservation_release
         CHECK (
             released_at IS NULL
