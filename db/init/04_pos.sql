@@ -31,12 +31,12 @@ CREATE TABLE IF NOT EXISTS pos_transaction_item (
 -- POS sale attempt
 -- Stock belongs to Inventory (inventory_db), so POS asks Inventory before it
 -- records a sale. dblink runs one query in inventory_db:
---   sell_stock(...)         checks Available-to-Sell (= on-hand - reserved) and, only if
---                           enough is available, takes the stock in one atomic step
---   check_availability(...) read-only; used to explain a refusal
--- Result: COMPLETED/NONE, or BLOCKED with RESERVED_STOCK (units are on hand but
--- reserved) or OUT_OF_STOCK. A blocked attempt is stored too (total 0.00, item kept),
--- as in the seed data, so it feeds the warehouse.
+--   sell_stock(...)  checks Available-to-Sell (= on-hand - reserved) and, only if enough
+--                    is available, takes the stock in one atomic step. It returns
+--                    (success, reason): reason is NONE, RESERVED_STOCK (units are on hand
+--                    but reserved) or OUT_OF_STOCK, and POS stores that reason as it is.
+-- Result: COMPLETED/NONE, or BLOCKED with the reason Inventory gave. A blocked attempt is
+-- stored too (total 0.00, item kept), as in the seed data, so it feeds the warehouse.
 --
 -- pos_sale_form is an insert-only "form" so a Metabase Action (which can only run
 -- INSERT / UPDATE) can make a sale.
@@ -76,7 +76,6 @@ DECLARE
     v_txn_id      VARCHAR(20);
     v_item_id     VARCHAR(20);
     v_sold        BOOLEAN;
-    v_on_hand     INTEGER;
     v_status      VARCHAR(20);
     v_reason      VARCHAR(255);
     v_total       NUMERIC(10,2);
@@ -108,32 +107,23 @@ BEGIN
     SELECT shared_id('TI', COALESCE(MAX(regexp_replace(transaction_item_id, '\D', '', 'g')::INTEGER), 0) + 1)
     INTO v_item_id FROM pos_transaction_item;
 
-    -- Ask Inventory whether the sale is allowed (the transaction ID is the idempotency reference)
-    SELECT s.sold
-    INTO v_sold
+    -- Ask Inventory whether the sale is allowed. sell_stock returns (success, reason); the
+    -- transaction ID is the idempotency reference, so a retry cannot take the stock twice.
+    SELECT s.success, s.reason
+    INTO v_sold, v_reason
     FROM dblink(
         'dbname=inventory_db',
-        format('SELECT sell_stock(%L, %L, %s, %L)',
+        format('SELECT success, reason FROM sell_stock(%L, %L, %s, %L)',
                p_product_id, p_store_id, p_quantity, v_txn_id)
-    ) AS s(sold BOOLEAN);
+    ) AS s(success BOOLEAN, reason VARCHAR);
 
     IF v_sold IS TRUE THEN
         v_status := 'COMPLETED';
         v_reason := 'NONE';
         v_total  := v_line_amount;
     ELSE
-        -- Why was it refused? Enough units on hand but reserved, or not enough on hand?
-        SELECT a.on_hand
-        INTO v_on_hand
-        FROM dblink(
-            'dbname=inventory_db',
-            format('SELECT out_on_hand FROM check_availability(%L, %L)', p_product_id, p_store_id)
-        ) AS a(on_hand INTEGER);
-
         v_status := 'BLOCKED';
-        v_reason := CASE WHEN COALESCE(v_on_hand, 0) >= p_quantity
-                         THEN 'RESERVED_STOCK'
-                         ELSE 'OUT_OF_STOCK' END;
+        v_reason := COALESCE(v_reason, 'OUT_OF_STOCK');
         v_total  := 0.00;
     END IF;
 

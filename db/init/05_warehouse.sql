@@ -34,8 +34,8 @@ CREATE TABLE IF NOT EXISTS dw.dim_date (
 CREATE TABLE IF NOT EXISTS dw.dim_product (
     product_key   SERIAL PRIMARY KEY,
     product_id    VARCHAR(20) NOT NULL UNIQUE,     -- natural key from Inventory.PRODUCT
-    sku           VARCHAR(20) NOT NULL,
-    product_name  VARCHAR(100) NOT NULL,
+    sku           VARCHAR(50) NOT NULL,
+    product_name  VARCHAR(150) NOT NULL,
     category      VARCHAR(50),
     unit_price    NUMERIC(10,2) NOT NULL
 );
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS dw.dim_store (
     store_key    SERIAL PRIMARY KEY,
     store_id     VARCHAR(20) NOT NULL UNIQUE,      -- natural key from Inventory.STORE
     store_name   VARCHAR(100) NOT NULL,
-    location     VARCHAR(100)
+    location     VARCHAR(150)
 );
 
 CREATE TABLE IF NOT EXISTS dw.dim_customer (
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS dw.fact_pos_activity (
     unit_price           NUMERIC(10,2) NOT NULL,
     line_amount          NUMERIC(10,2) NOT NULL,
     transaction_status   VARCHAR(20) NOT NULL,
-    rejection_reason     VARCHAR(30)
+    rejection_reason     VARCHAR(255)
 );
 
 -- Grain: one product line per online order
@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS dw.fact_online_order (
     quantity        INT NOT NULL,
     unit_price      NUMERIC(10,2) NOT NULL,
     line_amount     NUMERIC(10,2) NOT NULL,
-    order_status    VARCHAR(20) NOT NULL
+    order_status    VARCHAR(30) NOT NULL
 );
 
 -- Grain: one reservation
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS dw.fact_reservation (
     customer_key          INT NOT NULL REFERENCES dw.dim_customer(customer_key),
     date_key              INT NOT NULL REFERENCES dw.dim_date(date_key),
     quantity              INT NOT NULL,
-    reservation_status    VARCHAR(20) NOT NULL
+    reservation_status    VARCHAR(30) NOT NULL
 );
 
 -- Grain: product · store · date (periodic snapshot, one row per ETL run date)

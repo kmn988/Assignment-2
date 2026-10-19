@@ -66,7 +66,9 @@ reservation_summary AS (
     SELECT store_id,
            COUNT(*) AS reservations,
            COUNT(*) FILTER (WHERE reservation_status='ACTIVE') AS active_reservations,
-           COUNT(*) FILTER (WHERE reservation_status='CANCELLED') AS cancelled_reservations
+           COUNT(*) FILTER (WHERE reservation_status='CANCELLED') AS cancelled_reservations,
+           COUNT(*) FILTER (WHERE reservation_status='EXPIRED') AS expired_reservations,
+           COUNT(*) FILTER (WHERE reservation_status='COLLECTED') AS collected_reservations
     FROM ecommerce.reservation
     GROUP BY store_id
 )
@@ -76,7 +78,9 @@ SELECT
     COALESCE(o.online_orders,0) AS online_orders,
     COALESCE(r.reservations,0) AS reservations,
     COALESCE(r.active_reservations,0) AS active_reservations,
+    COALESCE(r.collected_reservations,0) AS collected_reservations,
     COALESCE(r.cancelled_reservations,0) AS cancelled_reservations,
+    COALESCE(r.expired_reservations,0) AS expired_reservations,
     COALESCE(p.pos_revenue,0) AS pos_revenue
 FROM inventory.store s
 LEFT JOIN pos_summary p ON p.store_id = s.store_id
